@@ -84,3 +84,4 @@ Needs `SUPABASE_SERVICE_ROLE_KEY` + Inngest keys. Inngest ticks every minute; sc
 - Supabase migrations / RLS: Forja `apps/web/supabase`
 - Optional Rust scrape worker: Forja `crates/iptv` (`iptv-worker`)
 - Packs published here land in ForjaHQ [forja-packs](https://github.com/mGhassen/forja-packs)
+- Plugin author contracts: [forja-sdk](https://github.com/mGhassen/forja-sdk)
