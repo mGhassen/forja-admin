@@ -40,6 +40,7 @@ import {
   fetchPoolHosts,
   fetchPoolPortalById,
   fetchPoolPortalStatusByIds,
+  fetchPoolRegions,
   poolHostKey,
   resolvePoolFocusPortalId,
   type PoolCand,
@@ -394,10 +395,16 @@ export function AdminPoolPage() {
       }),
   })
 
+  const regionsQuery = useQuery({
+    queryKey: ['admin', 'pool', 'regions'],
+    queryFn: fetchPoolRegions,
+    staleTime: 5 * 60_000,
+  })
+
   const hosts = hostsQuery.data?.hosts ?? []
   const hostCount = hostsQuery.data?.host_count ?? 0
   const portalCount = hostsQuery.data?.portal_count ?? 0
-  const regionOptions = hostsQuery.data?.regions ?? []
+  const regionOptions = regionsQuery.data ?? []
 
   // Deep-refs → Pool: resolve id, seed search, expand host.
   useEffect(() => {

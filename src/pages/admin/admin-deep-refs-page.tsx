@@ -43,9 +43,15 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { adminDb } from '@/lib/admin-db'
 import { reprocessDeepRefForAdmin } from '@/lib/deep-ref-reprocess'
-import { fetchAllRows } from '@/lib/fetch-all-rows'
+import {
+  deepRefLastAt,
+  fetchDeepRefPortals,
+  fetchDeepRefsPage,
+  type DeepRefFilterStatus,
+  type DeepRefPortalRow,
+  type DeepRefRow,
+} from '@/lib/iptv-deep-refs'
 import { fetchPasteBodyForAdmin } from '@/lib/paste-body'
 import {
   cancelPromoteBackfill,
@@ -80,90 +86,13 @@ const PASTE_PANEL_MIN = 280
 const PASTE_PANEL_MAX = 900
 const PASTE_PANEL_DEFAULT = 420
 
-type DeepRefPortalRow = {
-  id: string
-  platform: string
-  type: string
-  output: string
-  url: string
-  username: string
-  password: string
-  was_existing: boolean
-  portal_id: string | null
-  created_at: string
-}
-
-type DeepRefRow = {
-  id: string
-  post_id: string
-  scrape_run_id: string | null
-  base64: string
-  paste_url: string
-  ref_host: string
-  payload_hash: string
-  fetch_ok: boolean | null
-  extract_count: number
-  needs_recheck: boolean
-  created_at: string
-  /** Last collect/process upsert; falls back to created_at pre-migration. */
-  updated_at: string | null
-  iptv_scrape_runs: { started_at: string } | null
-  iptv_scrape_deep_ref_portals: DeepRefPortalRow[] | null
-}
-
-function deepRefLastAt(r: DeepRefRow): string {
-  return (
-    r.updated_at ||
-    r.iptv_scrape_runs?.started_at ||
-    r.created_at
-  )
-}
-
-type FilterStatus = 'all' | 'recheck' | 'ok' | 'has_portals' | 'existing_only'
-
-async function fetchDeepRefs(): Promise<DeepRefRow[]> {
-  const rows = await fetchAllRows<DeepRefRow>(async (from, to) => {
-    const { data, error } = await adminDb
-      .from('iptv_scrape_deep_refs')
-      .select(
-        `id, post_id, scrape_run_id, base64, paste_url, ref_host,
-         payload_hash, fetch_ok, extract_count, needs_recheck, created_at, updated_at,
-         iptv_scrape_runs ( started_at ),
-         iptv_scrape_deep_ref_portals (
-           id, platform, type, output, url, username, password, was_existing, portal_id, created_at
-         )`,
-      )
-      .order('id', { ascending: false })
-      .range(from, to)
-    if (error && /updated_at/i.test(error.message)) {
-      const retry = await adminDb
-        .from('iptv_scrape_deep_refs')
-        .select(
-          `id, post_id, scrape_run_id, base64, paste_url, ref_host,
-           payload_hash, fetch_ok, extract_count, needs_recheck, created_at,
-           iptv_scrape_runs ( started_at ),
-           iptv_scrape_deep_ref_portals (
-             id, platform, type, output, url, username, password, was_existing, portal_id, created_at
-           )`,
-        )
-        .order('id', { ascending: false })
-        .range(from, to)
-      if (retry.error) throw retry.error
-      return (retry.data ?? []).map((r: Omit<DeepRefRow, 'updated_at'>) => ({
-        ...(r as Omit<DeepRefRow, 'updated_at'>),
-        updated_at: null,
-      }))
-    }
-    if (error) throw error
-    return (data ?? []) as DeepRefRow[]
-  })
-  // One row per paste (post_id+hash). Force-full re-upserts same rows — sort by last touch.
-  return [...rows].sort((a, b) => {
-    const tb = Date.parse(deepRefLastAt(b))
-    const ta = Date.parse(deepRefLastAt(a))
-    if (tb !== ta) return tb - ta
-    return b.id.localeCompare(a.id)
-  })
+function useDebounced<T>(value: T, ms: number): T {
+  const [v, setV] = useState(value)
+  useEffect(() => {
+    const t = window.setTimeout(() => setV(value), ms)
+    return () => window.clearTimeout(t)
+  }, [value, ms])
+  return v
 }
 
 function clampPanelWidth(w: number) {
@@ -287,6 +216,43 @@ function DeepRefPortalsTable({ portals }: { portals: DeepRefPortalRow[] }) {
       />
     </div>
   )
+}
+
+function DeepRefPortalsSection({
+  deepRefId,
+  extractCount,
+  needsRecheck,
+}: {
+  deepRefId: string
+  extractCount: number
+  needsRecheck: boolean
+}) {
+  const portals = useQuery({
+    queryKey: ['admin', 'deep_ref_portals', deepRefId],
+    queryFn: () => fetchDeepRefPortals(deepRefId),
+  })
+
+  if (portals.isLoading) {
+    return <p className="text-sm text-forja-muted">Loading portals…</p>
+  }
+  if (portals.isError) {
+    return (
+      <p className="text-sm text-red-400">
+        {(portals.error as Error).message}
+      </p>
+    )
+  }
+  const rows = portals.data ?? []
+  if (rows.length === 0) {
+    return (
+      <p className="text-sm text-forja-muted">
+        No portals extracted
+        {needsRecheck ? ' — flagged for recheck' : ''}
+        {extractCount > 0 ? ` (extract_count ${extractCount})` : ''}.
+      </p>
+    )
+  }
+  return <DeepRefPortalsTable portals={rows} />
 }
 
 function decodeInlineBase64(raw: string): string | null {
@@ -511,16 +477,31 @@ export function AdminDeepRefsPage() {
       (r) => r.status === 'running' && isStalkerNoteBackfillRun(r),
     ) ?? null
   const anyBackfillRun = promoteBackfillRun ?? noteBackfillRun
-  const list = useQuery({
-    queryKey: DEEP_REFS_KEY,
-    queryFn: fetchDeepRefs,
-    refetchInterval: anyBackfillRun ? 2_000 : 12_000,
-  })
-
   const [q, setQ] = useState(() => focusRefId ?? '')
-  const [statusFilter, setStatusFilter] = useState<FilterStatus>('all')
+  const debouncedQ = useDebounced(q, 250)
+  const [statusFilter, setStatusFilter] = useState<DeepRefFilterStatus>('all')
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSize] = useState(50)
+
+  useEffect(() => {
+    setPage(0)
+  }, [debouncedQ, statusFilter, pageSize])
+
+  const list = useQuery({
+    queryKey: [...DEEP_REFS_KEY, debouncedQ, statusFilter, page, pageSize],
+    queryFn: () =>
+      fetchDeepRefsPage({
+        q: debouncedQ,
+        status: statusFilter,
+        limit: pageSize,
+        offset: page * pageSize,
+      }),
+    refetchInterval: anyBackfillRun ? 8_000 : false,
+  })
   const [openId, setOpenId] = useState<string | null>(() => focusRefId)
   const [pastePanelId, setPastePanelId] = useState<string | null>(null)
+  /** Keep paste panel row when the list page changes. */
+  const [pasteRowHold, setPasteRowHold] = useState<DeepRefRow | null>(null)
   const [panelWidth, setPanelWidth] = useState(PASTE_PANEL_DEFAULT)
   const [reprocessingId, setReprocessingId] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
@@ -551,6 +532,7 @@ export function AdminDeepRefsPage() {
     if (!backfillWasRunning.current) return
     backfillWasRunning.current = false
     void qc.invalidateQueries({ queryKey: DEEP_REFS_KEY })
+    void qc.invalidateQueries({ queryKey: ['admin', 'deep_ref_portals'] })
     void qc.invalidateQueries({ queryKey: ['admin', 'pool'] })
   }, [anyBackfillRun, qc])
 
@@ -598,18 +580,18 @@ export function AdminDeepRefsPage() {
     }
   }, [])
 
-  const rows = list.data ?? []
-
   const reprocess = useCallback(
     async (id: string) => {
       setActionError(null)
       setActionInfo(null)
       setReprocessingId(id)
       try {
-        const pasteUrl = (list.data ?? []).find((r) => r.id === id)?.paste_url
-          ?.trim()
+        const pasteUrl =
+          (list.data?.rows ?? []).find((r) => r.id === id)?.paste_url?.trim() ||
+          (pasteRowHold?.id === id ? pasteRowHold.paste_url.trim() : '')
         const result = await reprocessDeepRefForAdmin(id)
         await qc.invalidateQueries({ queryKey: DEEP_REFS_KEY })
+        await qc.invalidateQueries({ queryKey: ['admin', 'deep_ref_portals', id] })
         await qc.invalidateQueries({ queryKey: ['admin', 'pool'] })
         if (pasteUrl) {
           await qc.invalidateQueries({
@@ -626,7 +608,7 @@ export function AdminDeepRefsPage() {
         setReprocessingId(null)
       }
     },
-    [qc, list.data],
+    [qc, list.data?.rows, pasteRowHold],
   )
 
   const startBackfill = useCallback(
@@ -719,50 +701,20 @@ export function AdminDeepRefsPage() {
     }
   }, [noteBackfillRun, qc])
 
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase()
-    return rows.filter((r) => {
-      if (statusFilter === 'recheck' && !r.needs_recheck) return false
-      if (statusFilter === 'ok' && r.needs_recheck) return false
-      const portals = r.iptv_scrape_deep_ref_portals ?? []
-      if (statusFilter === 'has_portals' && portals.length === 0) return false
-      if (
-        statusFilter === 'existing_only' &&
-        !portals.some((p) => p.was_existing)
-      ) {
-        return false
-      }
-      if (!needle) return true
-      const hay = [
-        r.id,
-        r.post_id,
-        r.base64,
-        r.paste_url,
-        r.ref_host,
-        ...portals.flatMap((p) => [
-          p.platform,
-          p.type,
-          p.output,
-          p.url,
-          p.username,
-          p.portal_id,
-        ]),
-      ]
-        .join(' ')
-        .toLowerCase()
-      return hay.includes(needle)
-    })
-  }, [rows, q, statusFilter])
-
-  const paging = useTablePagination(filtered, {
-    initialPageSize: 50,
-    resetKey: `${q}|${statusFilter}`,
-  })
+  const rows = list.data?.rows ?? []
+  const total = list.data?.total ?? 0
+  const stats = list.data?.stats ?? {
+    total: 0,
+    recheck: 0,
+    withPaste: 0,
+    portalHits: 0,
+    notPromoted: 0,
+  }
 
   useEffect(() => {
-    if (!focusRefId || !list.data?.length) return
+    if (!focusRefId || !rows.length) return
     if (focusedOnce.current === focusRefId) return
-    const exists = list.data.some((r) => r.id === focusRefId)
+    const exists = rows.some((r) => r.id === focusRefId)
     if (!exists) return
     focusedOnce.current = focusRefId
     const t = window.setTimeout(() => {
@@ -771,32 +723,22 @@ export function AdminDeepRefsPage() {
         ?.scrollIntoView({ behavior: 'smooth', block: 'center' })
     }, 80)
     return () => window.clearTimeout(t)
-  }, [focusRefId, list.data, paging.page])
+  }, [focusRefId, rows, page])
 
-  const stats = useMemo(() => {
-    let recheck = 0
-    let withPaste = 0
-    let portalHits = 0
-    let notPromoted = 0
-    for (const r of rows) {
-      if (r.needs_recheck) recheck++
-      if (r.paste_url) withPaste++
-      const portals = r.iptv_scrape_deep_ref_portals ?? []
-      portalHits += portals.length
-      for (const p of portals) {
-        if (!p.portal_id) notPromoted++
-      }
-    }
-    return { total: rows.length, recheck, withPaste, portalHits, notPromoted }
-  }, [rows])
-
-  const pasteRow = useMemo(
-    () => (pastePanelId ? rows.find((r) => r.id === pastePanelId) : undefined),
-    [pastePanelId, rows],
-  )
+  const pasteRow = useMemo(() => {
+    if (!pastePanelId) return undefined
+    return rows.find((r) => r.id === pastePanelId) ?? pasteRowHold ?? undefined
+  }, [pastePanelId, rows, pasteRowHold])
 
   const togglePastePanel = (id: string) => {
-    setPastePanelId((cur) => (cur === id ? null : id))
+    setPastePanelId((cur) => {
+      if (cur === id) {
+        setPasteRowHold(null)
+        return null
+      }
+      setPasteRowHold(rows.find((r) => r.id === id) ?? null)
+      return id
+    })
   }
 
   return (
@@ -966,7 +908,7 @@ export function AdminDeepRefsPage() {
               <Input
                 id="deep-q"
                 className="pl-9"
-                placeholder="base64, paste URL, host, user, portal id…"
+                placeholder="id, post, paste URL, host, portal url/user…"
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
               />
@@ -978,7 +920,7 @@ export function AdminDeepRefsPage() {
             </Label>
             <Select
               value={statusFilter}
-              onValueChange={(v) => setStatusFilter(v as FilterStatus)}
+              onValueChange={(v) => setStatusFilter(v as DeepRefFilterStatus)}
             >
               <SelectTrigger className="w-44">
                 <SelectValue />
@@ -993,11 +935,13 @@ export function AdminDeepRefsPage() {
             </Select>
           </div>
           <p className="pb-2 text-xs text-forja-muted">
-            {filtered.length}
-            {rows.length !== filtered.length ? ` / ${rows.length}` : ''} refs
+            {total.toLocaleString()} match
+            {stats.total !== total
+              ? ` · ${stats.total.toLocaleString()} total`
+              : ''}
             <span className="text-forja-muted">
               {' '}
-              · one row per paste (run L2 portals are hits inside these)
+              · one row per paste (expand for portal hits)
             </span>
           </p>
         </div>
@@ -1008,7 +952,7 @@ export function AdminDeepRefsPage() {
           </p>
         ) : list.isLoading ? (
           <p className="text-sm text-forja-muted">Loading…</p>
-        ) : filtered.length === 0 ? (
+        ) : total === 0 ? (
           <EmptyState
             title="No deep refs yet"
             description="Run a full scrape. Each base64→paste.sh pair becomes one row here."
@@ -1040,8 +984,7 @@ export function AdminDeepRefsPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {paging.pageRows.map((r) => {
-                    const portals = r.iptv_scrape_deep_ref_portals ?? []
+                  {rows.map((r) => {
                     const open = openId === r.id
                     const pasteOpen = pastePanelId === r.id
                     return (
@@ -1100,7 +1043,7 @@ export function AdminDeepRefsPage() {
                             </div>
                           </td>
                           <td className={cn(tdClassName, 'tabular-nums')}>
-                            {portals.length || r.extract_count}
+                            {r.extract_count}
                           </td>
                           <td className={tdClassName}>
                             {r.needs_recheck ? (
@@ -1188,17 +1131,11 @@ export function AdminDeepRefsPage() {
                                     <FileCode2 className="size-3.5" />
                                     Portals (platform · type · output)
                                   </p>
-                                  {portals.length === 0 ? (
-                                    <p className="text-sm text-forja-muted">
-                                      No portals extracted
-                                      {r.needs_recheck
-                                        ? ' — flagged for recheck'
-                                        : ''}
-                                      .
-                                    </p>
-                                  ) : (
-                                    <DeepRefPortalsTable portals={portals} />
-                                  )}
+                                  <DeepRefPortalsSection
+                                    deepRefId={r.id}
+                                    extractCount={r.extract_count}
+                                    needsRecheck={r.needs_recheck}
+                                  />
                                 </div>
                               </div>
                             </td>
@@ -1211,11 +1148,12 @@ export function AdminDeepRefsPage() {
               </table>
             </div>
             <TablePagination
-              page={paging.page}
-              pageSize={paging.pageSize}
-              total={paging.total}
-              onPageChange={paging.setPage}
-              onPageSizeChange={paging.setPageSize}
+              page={page}
+              pageSize={pageSize}
+              total={total}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+              pageSizeOptions={[10, 25, 50, 100]}
             />
           </div>
         )}
@@ -1226,7 +1164,10 @@ export function AdminDeepRefsPage() {
           row={pasteRow}
           width={panelWidth}
           onWidthChange={onWidthChange}
-          onClose={() => setPastePanelId(null)}
+          onClose={() => {
+            setPastePanelId(null)
+            setPasteRowHold(null)
+          }}
           onReprocess={() => void reprocess(pasteRow.id)}
           reprocessing={reprocessingId === pasteRow.id}
         />

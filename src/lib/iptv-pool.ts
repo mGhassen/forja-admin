@@ -33,7 +33,6 @@ export type PoolHostsResult = {
   hosts: PoolHostSummary[]
   host_count: number
   portal_count: number
-  regions: string[]
 }
 
 export type PoolHostPortalsResult = {
@@ -65,6 +64,13 @@ export function poolHostKey(host: string): string {
   return host.trim().toLowerCase()
 }
 
+export async function fetchPoolRegions(): Promise<string[]> {
+  const { data, error } = await adminDb.rpc('admin_iptv_pool_regions')
+  if (error) throw new Error(errMessage(error, 'Pool regions failed'))
+  if (Array.isArray(data)) return data.map((r) => String(r))
+  return []
+}
+
 export async function fetchPoolHosts(
   opts: PoolFilterParams,
 ): Promise<PoolHostsResult> {
@@ -89,14 +95,10 @@ export async function fetchPoolHosts(
         last_scraped_at: (h.last_scraped_at as string | null) ?? null,
       }))
     : []
-  const regions = Array.isArray(raw.regions)
-    ? (raw.regions as unknown[]).map((r) => String(r))
-    : []
   return {
     hosts,
     host_count: Number(raw.host_count ?? 0),
     portal_count: Number(raw.portal_count ?? 0),
-    regions,
   }
 }
 
@@ -161,6 +163,7 @@ export async function fetchPoolHostPortals(
       ? data
       : []
   const rows = list as PoolCand[]
+  // RPC includes deep_ref_id; attachDeepRefIds only if an older deploy omitted it.
   const needsDeepRef = rows.some((r) => r.deep_ref_id === undefined)
   const portals = needsDeepRef
     ? await attachDeepRefIds(rows as Omit<PoolCand, 'deep_ref_id'>[])
