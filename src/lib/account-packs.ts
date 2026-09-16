@@ -6,6 +6,8 @@ export type AccountPackRow = {
   name?: string
   version?: string
   addedAt?: string
+  /** Master on/off — omit / true = enabled; false = installed but skipped */
+  enabled?: boolean
 }
 
 export type ProfileSettingsPacks = {
@@ -129,6 +131,7 @@ function packsFromPayload(payload: unknown): AccountPackRow[] {
     if (version) next.version = version
     const addedAt = typeof row.addedAt === 'string' ? row.addedAt.trim() : ''
     if (addedAt) next.addedAt = addedAt
+    if (row.enabled === false) next.enabled = false
     out.push(next)
   }
   return out
@@ -143,6 +146,7 @@ function leanPackRows(packs: AccountPackRow[]): AccountPackRow[] {
     if (version) row.version = version
     const addedAt = p.addedAt?.trim()
     if (addedAt) row.addedAt = addedAt
+    if (p.enabled === false) row.enabled = false
     return row
   })
 }
