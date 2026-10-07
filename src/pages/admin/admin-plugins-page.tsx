@@ -46,6 +46,9 @@ import {
   upsertPluginPack,
   validateManifestJson,
   validatePackAtUrl,
+  PACK_PLATFORMS,
+  PACK_PLATFORM_LABELS,
+  packPlatformsLabel,
   type PluginBundleWithItems,
   type PluginPack,
 } from '@/lib/plugin-catalog'
@@ -66,6 +69,7 @@ type ColKey =
   | 'id'
   | 'name'
   | 'kind'
+  | 'platforms'
   | 'version'
   | 'official'
   | 'recommended'
@@ -78,6 +82,7 @@ const ALL_COLS: ColKey[] = [
   'id',
   'name',
   'kind',
+  'platforms',
   'version',
   'official',
   'recommended',
@@ -93,6 +98,8 @@ type UiState = {
   sortDir: SortDir
   cols: ColKey[]
   kind: string
+  /** 'all' or one PackPlatform — packs that run on that device. */
+  platform: string
   published: 'all' | 'yes' | 'no'
   official: 'all' | 'yes' | 'no'
   tag: string
@@ -105,6 +112,7 @@ const DEFAULT_UI: UiState = {
   sortDir: 'asc',
   cols: DEFAULT_COLS,
   kind: 'all',
+  platform: 'all',
   published: 'all',
   official: 'all',
   tag: '',
@@ -184,6 +192,13 @@ export function AdminPluginsPage() {
     const tag = ui.tag.trim().toLowerCase()
     let rows = source.filter((p) => {
       if (ui.kind !== 'all' && p.kind !== ui.kind) return false
+      if (
+        ui.platform !== 'all' &&
+        (p.platforms ?? []).length > 0 &&
+        !(p.platforms ?? []).includes(ui.platform)
+      ) {
+        return false
+      }
       if (ui.published === 'yes' && !p.published) return false
       if (ui.published === 'no' && p.published) return false
       if (ui.official === 'yes' && !p.official) return false
@@ -242,7 +257,7 @@ export function AdminPluginsPage() {
 
   const page = useTablePagination(filtered, {
     initialPageSize: 40,
-    resetKey: `${ui.search}|${ui.kind}|${ui.published}|${ui.official}|${ui.tag}|${ui.sortKey}|${ui.sortDir}`,
+    resetKey: `${ui.search}|${ui.kind}|${ui.platform}|${ui.published}|${ui.official}|${ui.tag}|${ui.sortKey}|${ui.sortDir}`,
   })
   const pageRows = page.pageRows
 
@@ -394,6 +409,25 @@ export function AdminPluginsPage() {
                   {kinds.map((k) => (
                     <SelectItem key={k} value={k}>
                       {k}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="w-[140px] space-y-1">
+              <Label className="text-xs text-forja-muted">Device</Label>
+              <Select
+                value={ui.platform}
+                onValueChange={(v) => setUi((u) => ({ ...u, platform: v }))}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">All</SelectItem>
+                  {PACK_PLATFORMS.map((d) => (
+                    <SelectItem key={d} value={d}>
+                      {PACK_PLATFORM_LABELS[d]}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -580,6 +614,9 @@ export function AdminPluginsPage() {
                       </button>
                     </th>
                   ) : null}
+                  {show('platforms') ? (
+                    <th className={thClassName}>Devices</th>
+                  ) : null}
                   {show('version') ? (
                     <th className={thClassName}>
                       <button
@@ -672,6 +709,11 @@ export function AdminPluginsPage() {
                         ) : null}
                         {show('kind') ? (
                           <td className={tdClassName}>{pack.kind}</td>
+                        ) : null}
+                        {show('platforms') ? (
+                          <td className={cn(tdClassName, 'text-xs')}>
+                            {packPlatformsLabel(pack.platforms)}
+                          </td>
                         ) : null}
                         {show('version') ? (
                           <td className={cn(tdClassName, 'font-mono-ui text-xs')}>

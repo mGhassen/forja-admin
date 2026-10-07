@@ -24,6 +24,11 @@ export type PackValidationResult = {
   pluginCount?: number
   name?: string
   packId?: string
+  /**
+   * Devices the pack runs on, from manifest `platforms` (root default,
+   * per-plugin override). Empty = every device.
+   */
+  platforms?: PackPlatform[]
   errors: string[]
   warnings: string[]
   checkedFiles: string[]
@@ -33,6 +38,61 @@ export type PackValidationResult = {
 }
 
 const SUPPORTED_KINDS = new Set(['http', 'hop', 'catalog', 'host', 'torrent'])
+
+/** Manifest `platforms` vocabulary — mirrors forja-sdk manifest.schema.json. */
+export const PACK_PLATFORMS = ['desktop', 'phone', 'tv'] as const
+export type PackPlatform = (typeof PACK_PLATFORMS)[number]
+
+export const PACK_PLATFORM_LABELS: Record<PackPlatform, string> = {
+  desktop: 'Desktop',
+  phone: 'Phone',
+  tv: 'TV',
+}
+
+/** "All devices" or "Desktop · Phone". */
+export function packPlatformsLabel(platforms: readonly string[] | null | undefined): string {
+  const known = (platforms ?? []).filter((p): p is PackPlatform =>
+    (PACK_PLATFORMS as readonly string[]).includes(p),
+  )
+  if (known.length === 0 || known.length === PACK_PLATFORMS.length) {
+    return 'All devices'
+  }
+  return known.map((p) => PACK_PLATFORM_LABELS[p]).join(' · ')
+}
+
+/**
+ * Parse one `platforms` value. Returns null when absent, the list when valid,
+ * and pushes an error when malformed.
+ */
+function readPlatforms(
+  raw: unknown,
+  where: string,
+  errors: string[],
+): PackPlatform[] | null {
+  if (raw == null) return null
+  if (!Array.isArray(raw)) {
+    errors.push(`${where}.platforms must be an array`)
+    return null
+  }
+  const out: PackPlatform[] = []
+  for (const v of raw) {
+    if (
+      typeof v !== 'string' ||
+      !(PACK_PLATFORMS as readonly string[]).includes(v)
+    ) {
+      errors.push(
+        `${where}.platforms unknown value: ${String(v)} (desktop, phone, tv)`,
+      )
+      continue
+    }
+    if (!out.includes(v as PackPlatform)) out.push(v as PackPlatform)
+  }
+  if (out.length === 0) {
+    errors.push(`${where}.platforms must list at least one device`)
+    return null
+  }
+  return out
+}
 
 export function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -88,6 +148,12 @@ export function validateManifestJson(
     errors.push('prelude must be a non-empty string')
   }
 
+  const rootPlatforms = readPlatforms(raw.platforms, 'manifest', errors)
+  // Pack-level device set: union of each plugin's effective list. Any plugin
+  // with no list (and no root list) runs everywhere → empty = all.
+  const packPlatforms = new Set<PackPlatform>()
+  let anyAllDevices = false
+
   const plugins = raw.plugins
   if (!Array.isArray(plugins) || plugins.length === 0) {
     errors.push('plugins[] required and non-empty')
@@ -112,6 +178,10 @@ export function validateManifestJson(
       if (p.kind != null && !SUPPORTED_KINDS.has(String(p.kind))) {
         warnings.push(`plugins[${i}].kind unknown: ${String(p.kind)}`)
       }
+      const own = readPlatforms(p.platforms, `plugins[${i}]`, errors)
+      const effective = own ?? rootPlatforms
+      if (effective == null) anyAllDevices = true
+      else for (const d of effective) packPlatforms.add(d)
     }
   }
 
@@ -129,6 +199,9 @@ export function validateManifestJson(
     pluginCount: Array.isArray(plugins) ? plugins.length : undefined,
     name: nonEmptyString(raw.name) ? raw.name.trim() : undefined,
     packId: nonEmptyString(raw.id) ? raw.id.trim() : undefined,
+    platforms: anyAllDevices
+      ? []
+      : PACK_PLATFORMS.filter((d) => packPlatforms.has(d)),
     errors,
     warnings,
     files: [...new Set(files)],
@@ -275,6 +348,7 @@ export async function persistValidation(
   return updatePluginPack(id, {
     cached_version: result.version ?? null,
     plugin_count: result.pluginCount ?? null,
+    platforms: result.platforms ?? [],
     last_validated_at: new Date().toISOString(),
     last_validation: result as unknown as Json,
     ...(result.name ? { name: result.name } : {}),
