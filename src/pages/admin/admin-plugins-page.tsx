@@ -385,7 +385,7 @@ export function AdminPluginsPage() {
       {ui.tab === 'packs' ? (
         <>
           <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-[180px] flex-1 space-y-1">
+            <div className="min-w-45 flex-1 space-y-1">
               <Label className="text-xs text-forja-muted">Search</Label>
               <Input
                 value={ui.search}
@@ -395,7 +395,7 @@ export function AdminPluginsPage() {
                 placeholder="id, name, url…"
               />
             </div>
-            <div className="w-[140px] space-y-1">
+            <div className="w-35 space-y-1">
               <Label className="text-xs text-forja-muted">Kind</Label>
               <Select
                 value={ui.kind}
@@ -414,7 +414,7 @@ export function AdminPluginsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="w-[140px] space-y-1">
+            <div className="w-35 space-y-1">
               <Label className="text-xs text-forja-muted">Device</Label>
               <Select
                 value={ui.platform}
@@ -433,7 +433,7 @@ export function AdminPluginsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="w-[120px] space-y-1">
+            <div className="w-30 space-y-1">
               <Label className="text-xs text-forja-muted">Published</Label>
               <Select
                 value={ui.published}
@@ -454,7 +454,7 @@ export function AdminPluginsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="w-[120px] space-y-1">
+            <div className="w-30 space-y-1">
               <Label className="text-xs text-forja-muted">Official</Label>
               <Select
                 value={ui.official}
@@ -475,7 +475,7 @@ export function AdminPluginsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="w-[140px] space-y-1">
+            <div className="w-35 space-y-1">
               <Label className="text-xs text-forja-muted">Tag</Label>
               <Input
                 value={ui.tag}
@@ -503,7 +503,7 @@ export function AdminPluginsPage() {
                   'rounded-md px-2 py-0.5 text-xs',
                   show(c)
                     ? 'bg-forja-green/15 text-forja-green'
-                    : 'bg-white/[0.04] text-forja-muted',
+                    : 'bg-white/4 text-forja-muted',
                 )}
                 onClick={() => toggleCol(c)}
               >
