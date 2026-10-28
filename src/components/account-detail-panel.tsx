@@ -14,6 +14,7 @@ import {
   type IptvPortalEditForm,
 } from '@/components/iptv-portal-row'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -35,12 +36,14 @@ import {
 } from '@/lib/account-features'
 import {
   addPackToProfile,
+  addPacksToProfile,
   listAccountProfiles,
   fetchProfilePacks,
   packVersionStatus,
   removePackFromProfile,
   resolveLatestPackVersions,
 } from '@/lib/account-packs'
+import { listOfficialPluginPacks } from '@/lib/plugin-catalog'
 import { adminDb } from '@/lib/admin-db'
 import { catalogVerify } from '@/lib/catalog-verify'
 import {
@@ -452,6 +455,9 @@ function AccountPluginsPanel({
   const qc = useQueryClient()
   const [profileId, setProfileId] = useState<string>('')
   const [manifestUrl, setManifestUrl] = useState('')
+  const [selectedOfficialIds, setSelectedOfficialIds] = useState<Set<string>>(
+    () => new Set(),
+  )
   const [addError, setAddError] = useState<string | null>(null)
   const [removeUrl, setRemoveUrl] = useState<string | null>(null)
 
@@ -471,10 +477,20 @@ function AccountPluginsPanel({
     )
   }, [profiles.data])
 
+  useEffect(() => {
+    setSelectedOfficialIds(new Set())
+  }, [profileId])
+
   const packs = useQuery({
     queryKey: ['admin', 'account_packs', accountId, profileId],
     queryFn: () => fetchProfilePacks(accountId, profileId),
     enabled: Boolean(profileId),
+  })
+
+  const official = useQuery({
+    queryKey: ['admin', 'official_plugin_packs'],
+    queryFn: listOfficialPluginPacks,
+    staleTime: 60_000,
   })
 
   const packUrls = useMemo(
@@ -482,12 +498,42 @@ function AccountPluginsPanel({
     [packs.data?.packs],
   )
 
+  const installedUrls = useMemo(() => new Set(packUrls), [packUrls])
+
+  const availableOfficial = useMemo(
+    () =>
+      (official.data ?? []).filter(
+        (p) => p.manifest_url.trim() && !installedUrls.has(p.manifest_url.trim()),
+      ),
+    [official.data, installedUrls],
+  )
+
+  useEffect(() => {
+    setSelectedOfficialIds((cur) => {
+      if (cur.size === 0) return cur
+      const avail = new Set(availableOfficial.map((p) => p.id))
+      let changed = false
+      const next = new Set<string>()
+      for (const id of cur) {
+        if (avail.has(id)) next.add(id)
+        else changed = true
+      }
+      return changed ? next : cur
+    })
+  }, [availableOfficial])
+
   const latestVersions = useQuery({
     queryKey: ['admin', 'pack_latest_versions', packUrls],
     queryFn: () => resolveLatestPackVersions(packUrls),
     enabled: packUrls.length > 0,
     staleTime: 60_000,
   })
+
+  const invalidatePacks = async () => {
+    await qc.invalidateQueries({
+      queryKey: ['admin', 'account_packs', accountId, profileId],
+    })
+  }
 
   const add = useMutation({
     mutationFn: () =>
@@ -499,9 +545,33 @@ function AccountPluginsPanel({
     onSuccess: async () => {
       setManifestUrl('')
       setAddError(null)
-      await qc.invalidateQueries({
-        queryKey: ['admin', 'account_packs', accountId, profileId],
+      await invalidatePacks()
+    },
+    onError: (e) => {
+      setAddError(e instanceof Error ? e.message : 'Add failed')
+    },
+  })
+
+  const addOfficial = useMutation({
+    mutationFn: async () => {
+      const byId = new Map((official.data ?? []).map((p) => [p.id, p]))
+      const selected = [...selectedOfficialIds]
+        .map((id) => byId.get(id))
+        .filter((p): p is NonNullable<typeof p> => Boolean(p))
+      if (selected.length === 0) throw new Error('Select at least one pack')
+      return addPacksToProfile({
+        accountId,
+        profileId,
+        packs: selected.map((p) => ({
+          manifestUrl: p.manifest_url,
+          name: p.name,
+        })),
       })
+    },
+    onSuccess: async () => {
+      setSelectedOfficialIds(new Set())
+      setAddError(null)
+      await invalidatePacks()
     },
     onError: (e) => {
       setAddError(e instanceof Error ? e.message : 'Add failed')
@@ -517,11 +587,26 @@ function AccountPluginsPanel({
       }),
     onSuccess: async () => {
       setRemoveUrl(null)
-      await qc.invalidateQueries({
-        queryKey: ['admin', 'account_packs', accountId, profileId],
-      })
+      await invalidatePacks()
     },
   })
+
+  const busy = add.isPending || addOfficial.isPending
+
+  const toggleOfficial = (id: string, on: boolean) => {
+    setSelectedOfficialIds((cur) => {
+      const next = new Set(cur)
+      if (on) next.add(id)
+      else next.delete(id)
+      return next
+    })
+  }
+
+  const toggleAllOfficial = (on: boolean) => {
+    setSelectedOfficialIds(
+      on ? new Set(availableOfficial.map((p) => p.id)) : new Set(),
+    )
+  }
 
   return (
     <div className="space-y-4">
@@ -556,15 +641,102 @@ function AccountPluginsPanel({
 
       {profileId ? (
         <>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <Label>Official packs</Label>
+              {availableOfficial.length > 0 ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={selectedOfficialIds.size === 0 || busy}
+                  onClick={() => addOfficial.mutate()}
+                >
+                  <Plus className="size-3.5" />
+                  {addOfficial.isPending
+                    ? 'Adding…'
+                    : selectedOfficialIds.size > 0
+                      ? `Add ${selectedOfficialIds.size}`
+                      : 'Add'}
+                </Button>
+              ) : null}
+            </div>
+            {official.isLoading ? (
+              <p className="text-sm text-forja-muted">Loading official packs…</p>
+            ) : official.error ? (
+              <p className="text-sm text-red-400">
+                {(official.error as Error).message}
+              </p>
+            ) : availableOfficial.length === 0 ? (
+              <p className="text-sm text-forja-muted">
+                {(official.data ?? []).length === 0
+                  ? 'No official packs in catalog.'
+                  : 'All official packs already on this profile.'}
+              </p>
+            ) : (
+              <div className="overflow-hidden rounded-md border border-forja-border/80">
+                <div className="flex items-center gap-2 border-b border-forja-border/80 px-3 py-2">
+                  <Checkbox
+                    checked={
+                      selectedOfficialIds.size > 0 &&
+                      selectedOfficialIds.size === availableOfficial.length
+                    }
+                    indeterminate={
+                      selectedOfficialIds.size > 0 &&
+                      selectedOfficialIds.size < availableOfficial.length
+                    }
+                    onCheckedChange={toggleAllOfficial}
+                    disabled={busy}
+                    aria-label="Select all official packs"
+                  />
+                  <span className="text-xs text-forja-muted">
+                    {selectedOfficialIds.size}/{availableOfficial.length} selected
+                  </span>
+                </div>
+                <ul className="max-h-48 overflow-y-auto">
+                  {availableOfficial.map((p) => {
+                    const checked = selectedOfficialIds.has(p.id)
+                    return (
+                      <li
+                        key={p.id}
+                        className="flex items-center gap-2 border-t border-forja-border/60 px-3 py-2 first:border-t-0"
+                      >
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={(on) => toggleOfficial(p.id, on)}
+                          disabled={busy}
+                          aria-label={`Select ${p.name}`}
+                        />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
+                          disabled={busy}
+                          onClick={() => toggleOfficial(p.id, !checked)}
+                        >
+                          <span className="block truncate text-sm font-medium">
+                            {p.name}
+                          </span>
+                          <span className="block truncate font-mono text-[11px] text-forja-muted">
+                            {p.cached_version?.trim() || p.id}
+                          </span>
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+
           <div className="flex flex-wrap items-end gap-2">
             <div className="min-w-0 flex-1 space-y-1.5">
-              <Label htmlFor="account-plugin-url">Add pack</Label>
+              <Label htmlFor="account-plugin-url">Add by URL</Label>
               <Input
                 id="account-plugin-url"
                 placeholder="https://…/manifest.json"
                 value={manifestUrl}
                 onChange={(e) => setManifestUrl(e.target.value)}
-                disabled={add.isPending}
+                disabled={busy}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
                     e.preventDefault()
@@ -577,7 +749,7 @@ function AccountPluginsPanel({
               type="button"
               variant="secondary"
               size="sm"
-              disabled={!manifestUrl.trim() || add.isPending}
+              disabled={!manifestUrl.trim() || busy}
               onClick={() => add.mutate()}
             >
               <Plus className="size-3.5" />

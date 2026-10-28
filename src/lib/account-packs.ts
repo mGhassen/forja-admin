@@ -254,38 +254,65 @@ export async function addPackToProfile(opts: {
   manifestUrl: string
   name?: string
 }): Promise<AccountPackRow> {
-  const manifestUrl = opts.manifestUrl.trim()
-  if (!manifestUrl) throw new Error('Manifest URL required')
+  const [row] = await addPacksToProfile({
+    accountId: opts.accountId,
+    profileId: opts.profileId,
+    packs: [{ manifestUrl: opts.manifestUrl, name: opts.name }],
+  })
+  if (!row) throw new Error('Pack already on this profile')
+  return row
+}
+
+/** Add one or more packs in a single settings write. Skips URLs already present. */
+export async function addPacksToProfile(opts: {
+  accountId: string
+  profileId: string
+  packs: Array<{ manifestUrl: string; name?: string }>
+}): Promise<AccountPackRow[]> {
+  const wanted = opts.packs
+    .map((p) => ({
+      manifestUrl: p.manifestUrl.trim(),
+      name: p.name?.trim() || undefined,
+    }))
+    .filter((p) => p.manifestUrl)
+  if (wanted.length === 0) throw new Error('Manifest URL required')
 
   const current = await fetchProfilePacks(opts.accountId, opts.profileId)
-  if (current.packs.some((p) => p.manifestUrl.trim() === manifestUrl)) {
-    throw new Error('Pack already on this profile')
+  const have = new Set(current.packs.map((p) => p.manifestUrl.trim()))
+  const toAdd = wanted.filter((p) => !have.has(p.manifestUrl))
+  if (toAdd.length === 0) {
+    throw new Error(
+      wanted.length === 1
+        ? 'Pack already on this profile'
+        : 'All selected packs are already on this profile',
+    )
   }
 
-  const meta = await fetchManifestMeta(manifestUrl)
-  const version = meta.version?.trim()
-  if (!version) {
-    throw new Error('Manifest has no version — cannot add pack')
-  }
-  const name =
-    opts.name?.trim() ||
-    meta.name?.trim() ||
-    manifestUrl
-
-  const row: AccountPackRow = {
-    manifestUrl,
-    name,
-    version,
-    addedAt: new Date().toISOString(),
+  const addedAt = new Date().toISOString()
+  const rows: AccountPackRow[] = []
+  for (const pack of toAdd) {
+    const meta = await fetchManifestMeta(pack.manifestUrl)
+    const version = meta.version?.trim()
+    if (!version) {
+      throw new Error(
+        `Manifest has no version — cannot add ${pack.name || pack.manifestUrl}`,
+      )
+    }
+    rows.push({
+      manifestUrl: pack.manifestUrl,
+      name: pack.name || meta.name?.trim() || pack.manifestUrl,
+      version,
+      addedAt,
+    })
   }
 
   await upsertPacks({
     accountId: opts.accountId,
     profileId: opts.profileId,
     payload: current.payload,
-    packs: [...current.packs, row],
+    packs: [...current.packs, ...rows],
   })
-  return row
+  return rows
 }
 
 export async function removePackFromProfile(opts: {

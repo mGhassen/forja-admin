@@ -310,6 +310,18 @@ export async function listPluginPacks(): Promise<PluginPack[]> {
   return data ?? []
 }
 
+/** Official catalog packs for admin assign UI (sorted). */
+export async function listOfficialPluginPacks(): Promise<PluginPack[]> {
+  const { data, error } = await adminDb
+    .from('plugin_packs')
+    .select('*')
+    .eq('official', true)
+    .order('sort_order', { ascending: true })
+    .order('name', { ascending: true })
+  if (error) throw error
+  return data ?? []
+}
+
 export async function upsertPluginPack(
   row: PluginPackInsert,
 ): Promise<PluginPack> {
